@@ -765,6 +765,28 @@ export async function executeSubscriptionFulfillment(orderId: string): Promise<v
   }
 }
 
+
+async function getBalanceRechargeCreditAmount(order: { amount: Prisma.Decimal | number; subscriptionGroupId: number | null }): Promise<number> {
+  const baseAmount = Number(order.amount);
+
+  if (order.subscriptionGroupId) {
+    return baseAmount;
+  }
+
+  const channel = await prisma.channel.findFirst({
+    where: { enabled: true },
+    orderBy: { sortOrder: 'asc' },
+    select: { rateMultiplier: true },
+  });
+
+  const rateMultiplier = Number(channel?.rateMultiplier ?? 1);
+  if (!Number.isFinite(rateMultiplier) || rateMultiplier <= 0) {
+    return baseAmount;
+  }
+
+  return Number((baseAmount / rateMultiplier).toFixed(2));
+}
+
 export async function executeRecharge(orderId: string): Promise<void> {
   const order = await prisma.order.findUnique({ where: { id: orderId } });
   if (!order) {
@@ -791,9 +813,11 @@ export async function executeRecharge(orderId: string): Promise<void> {
   }
 
   try {
+    const creditAmount = await getBalanceRechargeCreditAmount(order);
+
     await createAndRedeem(
       order.rechargeCode,
-      Number(order.amount),
+      creditAmount,
       order.userId,
       `sub2apipay recharge order:${orderId}`,
     );
@@ -807,7 +831,7 @@ export async function executeRecharge(orderId: string): Promise<void> {
       data: {
         orderId,
         action: 'RECHARGE_SUCCESS',
-        detail: JSON.stringify({ rechargeCode: order.rechargeCode, amount: Number(order.amount) }),
+        detail: JSON.stringify({ rechargeCode: order.rechargeCode, amount: Number(order.amount), creditedAmount: creditAmount }),
         operator: 'system',
       },
     });
@@ -979,19 +1003,19 @@ export async function processRefund(input: RefundInput): Promise<RefundResult> {
     );
   }
 
-  const rechargeAmount = Number(order.amount);
+  const creditedAmount = await getBalanceRechargeCreditAmount(order);
   const refundAmount = Number(order.payAmount ?? order.amount);
 
   if (!input.force) {
     try {
       const user = await getUser(order.userId);
-      if (user.balance < rechargeAmount) {
+      if (user.balance < creditedAmount) {
         return {
           success: false,
           warning: message(
             locale,
-            `用户余额 ${user.balance} 小于需退款的充值金额 ${rechargeAmount}`,
-            `User balance ${user.balance} is lower than refund ${rechargeAmount}`,
+            `用户余额 ${user.balance} 小于需退款的到账金额 ${creditedAmount}`,
+            `User balance ${user.balance} is lower than credited amount ${creditedAmount}`,
           ),
           requireForce: true,
         };
@@ -1021,7 +1045,7 @@ export async function processRefund(input: RefundInput): Promise<RefundResult> {
     // 1. 先扣减用户余额（安全方向：先扣后退）
     await subtractBalance(
       order.userId,
-      rechargeAmount,
+      creditedAmount,
       `sub2apipay refund order:${order.id}`,
       `sub2apipay:refund:${order.id}`,
     );
@@ -1042,14 +1066,14 @@ export async function processRefund(input: RefundInput): Promise<RefundResult> {
         try {
           await addBalance(
             order.userId,
-            rechargeAmount,
+            creditedAmount,
             `sub2apipay refund rollback order:${order.id}`,
             `sub2apipay:refund-rollback:${order.id}`,
           );
         } catch (rollbackError) {
           // 余额恢复也失败，记录审计日志并标记需要补偿，便于定时任务或管理员重试
           console.error(
-            `[CRITICAL] Refund rollback failed for order ${input.orderId}: balance deducted ${rechargeAmount} but gateway refund and balance restoration both failed. Manual intervention required.`,
+            `[CRITICAL] Refund rollback failed for order ${input.orderId}: balance deducted ${creditedAmount} but gateway refund and balance restoration both failed. Manual intervention required.`,
           );
           await prisma.auditLog.create({
             data: {
@@ -1058,7 +1082,7 @@ export async function processRefund(input: RefundInput): Promise<RefundResult> {
               detail: JSON.stringify({
                 gatewayError: gatewayError instanceof Error ? gatewayError.message : String(gatewayError),
                 rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
-                rechargeAmount,
+                creditedAmount,
                 needsBalanceCompensation: true,
               }),
               operator: 'admin',
@@ -1084,7 +1108,7 @@ export async function processRefund(input: RefundInput): Promise<RefundResult> {
       data: {
         orderId: input.orderId,
         action: 'REFUND_SUCCESS',
-        detail: JSON.stringify({ rechargeAmount, refundAmount, reason: input.reason, force: input.force }),
+        detail: JSON.stringify({ creditedAmount, refundAmount, reason: input.reason, force: input.force }),
         operator: 'admin',
       },
     });
