@@ -767,8 +767,10 @@ export async function executeSubscriptionFulfillment(orderId: string): Promise<v
   }
 }
 
-
-async function getBalanceRechargeCreditAmount(order: { amount: Prisma.Decimal | number; subscriptionGroupId: number | null }): Promise<number> {
+async function getBalanceRechargeCreditAmount(order: {
+  amount: Prisma.Decimal | number;
+  subscriptionGroupId: number | null;
+}): Promise<number> {
   const baseAmount = Number(order.amount);
 
   if (order.subscriptionGroupId) {
@@ -817,12 +819,7 @@ export async function executeRecharge(orderId: string): Promise<void> {
   try {
     const creditAmount = await getBalanceRechargeCreditAmount(order);
 
-    await createAndRedeem(
-      order.rechargeCode,
-      creditAmount,
-      order.userId,
-      `sub2apipay recharge order:${orderId}`,
-    );
+    await createAndRedeem(order.rechargeCode, creditAmount, order.userId, `sub2apipay recharge order:${orderId}`);
 
     await prisma.order.updateMany({
       where: { id: orderId, status: ORDER_STATUS.RECHARGING },
@@ -833,7 +830,11 @@ export async function executeRecharge(orderId: string): Promise<void> {
       data: {
         orderId,
         action: 'RECHARGE_SUCCESS',
-        detail: JSON.stringify({ rechargeCode: order.rechargeCode, amount: Number(order.amount), creditedAmount: creditAmount }),
+        detail: JSON.stringify({
+          rechargeCode: order.rechargeCode,
+          amount: Number(order.amount),
+          creditedAmount: creditAmount,
+        }),
         operator: 'system',
       },
     });
